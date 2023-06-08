@@ -1,4 +1,5 @@
-PLUGIN_DEST = $(DESTDIR)/usr/lib/kernel/install.d/80-ukify.install
+PLUGIN_PRIORITY ?= 80
+PLUGIN_DEST = $(DESTDIR)/usr/lib/kernel/install.d/$(PLUGIN_PRIORITY)-ukify.install
 
 .PHONY: install
 install: 80-ukify.install
