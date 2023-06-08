@@ -1,0 +1,88 @@
+#!/bin/sh
+# -*- mode: shell-script; indent-tabs-mode: nil; sh-basic-offset: 4; -*-
+# SPDX-License-Identifier: MIT
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+# ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+# TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+# SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+# CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+# IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+# DEALINGS IN THE SOFTWARE.
+
+set -e
+
+[ "$KERNEL_INSTALL_LAYOUT" = "uki" ] || exit 0
+
+COMMAND="${1:?}"
+KERNEL_VERSION="${2:?}"
+ENTRY_DIR_ABS="${3:?}"
+KERNEL_IMAGE="$4"
+INITRD_OPTIONS_SHIFT=4
+
+MACHINE_ID="$KERNEL_INSTALL_MACHINE_ID"
+ENTRY_TOKEN="$KERNEL_INSTALL_ENTRY_TOKEN"
+BOOT_ROOT="$KERNEL_INSTALL_BOOT_ROOT"
+VMLINUZ="/usr/lib/modules/${KERNEL_VERSION}/vmlinuz"
+
+if [ -f /etc/os-release ]; then
+    # shellcheck source=/dev/null
+    . /etc/os-release
+elif [ -f /usr/lib/os-release ]; then
+    # shellcheck source=/dev/null
+    . /usr/lib/os-release
+fi
+
+[ -n "$PRETTY_NAME" ] || PRETTY_NAME="Linux $KERNEL_VERSION"
+
+if [ -n "$KERNEL_INSTALL_CONF_ROOT" ]; then
+    if [ -f "$KERNEL_INSTALL_CONF_ROOT/cmdline" ]; then
+        BOOT_OPTIONS="$(tr -s "$IFS" ' ' <"$KERNEL_INSTALL_CONF_ROOT/cmdline")"
+    fi
+elif [ -f /etc/kernel/cmdline ]; then
+    BOOT_OPTIONS="$(tr -s "$IFS" ' ' </etc/kernel/cmdline)"
+elif [ -f /usr/lib/kernel/cmdline ]; then
+    BOOT_OPTIONS="$(tr -s "$IFS" ' ' </usr/lib/kernel/cmdline)"
+else
+    BOOT_OPTIONS="$(tr -s "$IFS" '\n' </proc/cmdline | grep -ve '^BOOT_IMAGE=' -e '^initrd=' | tr '\n' ' ')"
+fi
+
+BOOT_OPTIONS="${BOOT_OPTIONS% }"
+
+if [ "$ENTRY_TOKEN" = "$MACHINE_ID" ] && ! echo "$BOOT_OPTIONS" | grep -q "systemd.machine_id="; then
+    BOOT_OPTIONS="$BOOT_OPTIONS systemd.machine_id=$MACHINE_ID"
+fi
+
+shift "$INITRD_OPTIONS_SHIFT"
+have_initrd=
+for initrd in "${KERNEL_INSTALL_STAGING_AREA}/initrd*"; do
+    [ -f "$initrd" ] || {
+        [ "$initrd" = "${KERNEL_INSTALL_STAGING_AREA}/initrd*" ] && continue
+        echo "Error: initrd '$initrd' not a file." >&2
+        exit 1
+    }
+    [ "$KERNEL_INSTALL_VERBOSE" -gt 0 ] && \
+        echo "Generating UKI for $initrd"
+    /usr/lib/systemd/ukify "$VMLINUZ" "$initrd" --uname "$KERNEL_VERSION" --output "$KERNEL_INSTALL_STAGING_AREA/uki.efi" --cmdline="$BOOT_OPTIONS"
+    have_initrd=yes
+done
+
+if [ -z "$have_initrd" ]; then
+    initrd=
+    # Dracut might install images here
+    if [ -f "$ENTRY_DIR_ABS/initrd" ]; then
+        initrd="$ENTRY_DIR_ABS/initrd"
+    else
+        initrd="/boot/initramfs-${KERNEL_VERSION}.img"
+    fi
+
+    [ "$KERNEL_INSTALL_VERBOSE" -gt 0 ] && \
+        echo "$Generating UKI for $initrd"
+
+    /usr/lib/systemd/ukify "$VMLINUZ" "$initrd" --uname "$KERNEL_VERSION" --output "$KERNEL_INSTALL_STAGING_AREA/uki.efi" --cmdline="$BOOT_OPTIONS"
+fi
+
+
+exit 0
