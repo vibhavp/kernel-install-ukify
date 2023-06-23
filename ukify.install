@@ -29,6 +29,12 @@ ENTRY_TOKEN="$KERNEL_INSTALL_ENTRY_TOKEN"
 BOOT_ROOT="$KERNEL_INSTALL_BOOT_ROOT"
 VMLINUZ="/usr/lib/modules/${KERNEL_VERSION}/vmlinuz"
 
+log() {
+    if [ "$KERNEL_INSTALL_VERBOSE" -gt 0 ]; then
+        echo $@
+    fi
+}
+
 if [ -f /etc/os-release ]; then
     # shellcheck source=/dev/null
     . /etc/os-release
@@ -41,12 +47,12 @@ fi
 
 if [ -n "$KERNEL_INSTALL_CONF_ROOT" ]; then
     if [ -f "$KERNEL_INSTALL_CONF_ROOT/cmdline" ]; then
-        BOOT_OPTIONS="$(tr -s "$IFS" ' ' <"$KERNEL_INSTALL_CONF_ROOT/cmdline")"
+        BOOT_OPTIONS="@$KERNEL_INSTALL_CONF_ROOT/cmdline"
     fi
 elif [ -f /etc/kernel/cmdline ]; then
-    BOOT_OPTIONS="$(tr -s "$IFS" ' ' </etc/kernel/cmdline)"
+    BOOT_OPTIONS="@/etc/kernel/cmdline"
 elif [ -f /usr/lib/kernel/cmdline ]; then
-    BOOT_OPTIONS="$(tr -s "$IFS" ' ' </usr/lib/kernel/cmdline)"
+    BOOT_OPTIONS="@/usr/lib/kernel/cmdline"
 else
     BOOT_OPTIONS="$(tr -s "$IFS" '\n' </proc/cmdline | grep -ve '^BOOT_IMAGE=' -e '^initrd=' | tr '\n' ' ')"
 fi
@@ -57,6 +63,56 @@ if [ "$ENTRY_TOKEN" = "$MACHINE_ID" ] && ! echo "$BOOT_OPTIONS" | grep -q "syste
     BOOT_OPTIONS="$BOOT_OPTIONS systemd.machine_id=$MACHINE_ID"
 fi
 
+ukify_args=(--uname "$KERNEL_VERSION")
+ukify_args+=(--output "$KERNEL_INSTALL_STAGING_AREA/uki.efi")
+ukify_args+=(--cmdline "$BOOT_OPTIONS")
+pcr_calc=
+
+if [ -n "$KERNEL_INSTALL_UKIFY_PCR_PUBLIC_KEY" ]; then
+    ukify_args+=(--pcr-public-key "$KERNEL_INSTALL_UKIFY_PCR_PUBLIC_KEY")
+    pcr_calc=yes
+elif [ -f /etc/systemd/tpm2-pcr-public.pem ]; then
+    ukify_args+=(--pcr-public-key /etc/systemd/tpm2-pcr-public.pem)
+    pcr_calc=yes
+fi
+
+if [ -n "$KERNEL_INSTALL_UKIFY_PCR_PRIVATE_KEY" ]; then
+    ukify_args+=(--pcr-private-key "$KERNEL_INSTALL_UKIFY_PCR_PRIVATE_KEY")
+    pcr_calc=yes
+elif [ -f /etc/systemd/tpm2-pcr-private.pem ]; then
+    ukify_args+=(--pcr-private-key /etc/systemd/tpm2-pcr-private.pem)
+    pcr_calc=yes
+fi
+
+if [ -n "$pcr_calc" ]; then
+    ukify_arg+=(--measure)
+    if [ -n "$KERNEL_INSTALL_UKIFY_PHASES" ]; then
+        ukify_args+=(--phases "$KERNEL_INSTALL_UKIFY_PHASES")
+
+    fi
+
+    if [ -n "$KERNEL_INSTALL_UKIFY_PCR_BANKS" ]; then
+        ukify_args+=(--pcr-banks "$KERNEL_INSTALL_UKIFY_PCR_BANKS")
+    elif command -v tpm2_pcrread > /dev/null; then
+        pcr_banks=()
+        # Figure out supported PCR banks
+        if tpm2_pcrread sha1 > /dev/null 2> /dev/null; then
+            pcr_banks+=(sha1)
+        fi
+        if tpm2_pcrread sha256 > /dev/null 2> /dev/null; then
+            pcr_banks+=(sha256)
+        fi
+        if tpm2_pcrread sha384 > /dev/null 2> /dev/null; then
+            pcr_banks+=(sha384)
+        fi
+        if tpm2_pcrread sha512 > /dev/null 2> /dev/null; then
+            pcr_banks+=(sha512)
+        fi
+        banks=`echo $(echo "${pcr_banks[@]}") | tr ' ' ','`
+        ukify_args+=(--pcr-banks "$banks")
+    fi
+fi
+
 shift "$INITRD_OPTIONS_SHIFT"
 have_initrd=
 for initrd in "${KERNEL_INSTALL_STAGING_AREA}/initrd*"; do
@@ -65,9 +121,8 @@ for initrd in "${KERNEL_INSTALL_STAGING_AREA}/initrd*"; do
         echo "Error: initrd '$initrd' not a file." >&2
         exit 1
     }
-    [ "$KERNEL_INSTALL_VERBOSE" -gt 0 ] && \
-        echo "Generating UKI for $initrd"
-    /usr/lib/systemd/ukify "$VMLINUZ" "$initrd" --uname "$KERNEL_VERSION" --output "$KERNEL_INSTALL_STAGING_AREA/uki.efi" --cmdline="$BOOT_OPTIONS"
+    log "Generating UKI for $initrd"
+    /usr/lib/systemd/ukify "$VMLINUZ" "$initrd" "${ukify_args[@]}"
     have_initrd=yes
 done
 
@@ -80,10 +135,9 @@ if [ -z "$have_initrd" ]; then
         initrd="/boot/initramfs-${KERNEL_VERSION}.img"
     fi
 
-    [ "$KERNEL_INSTALL_VERBOSE" -gt 0 ] && \
-        echo "$Generating UKI for $initrd"
+    log "Generating UKI for $initrd"
 
-    /usr/lib/systemd/ukify "$VMLINUZ" "$initrd" --uname "$KERNEL_VERSION" --output "$KERNEL_INSTALL_STAGING_AREA/uki.efi" --cmdline="$BOOT_OPTIONS"
+    /usr/lib/systemd/ukify "$VMLINUZ" "$initrd" "${ukify_args[@]}"
 fi
 
 
